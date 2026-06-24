@@ -99,8 +99,9 @@ def test_rel_age_empty_or_bad():
 
 
 # ── render ────────────────────────────────────────────────────────────────────
-def _component(name, status, group=False, group_id=None):
-    return {"name": name, "status": status, "group": group, "group_id": group_id}
+def _component(name, status, group=False, group_id=None, id=None):
+    return {"id": id, "name": name, "status": status,
+            "group": group, "group_id": group_id}
 
 
 def _base_summary(**over):
@@ -225,19 +226,55 @@ def test_render_unknown_status_symbol(frozen_time, no_color):
     assert "○" in out
 
 
-def test_render_component_groups_current_flatten_behavior(frozen_time, no_color):
-    """Documents *current* behavior: group containers are dropped, children
-    (which carry group_id but group=False) render flat. See plan Tier-2 #3."""
+def test_render_component_groups_nested_under_heading(frozen_time, no_color):
+    """Group containers render as a heading with their leaves indented beneath;
+    ungrouped leaves stay at the top level. (Tier-2 #3.)"""
     summary = _base_summary(components=[
-        _component("API Group", "operational", group=True),
+        _component("API Group", "operational", group=True, id="grp1"),
         _component("Child One", "operational", group_id="grp1"),
         _component("Child Two", "degraded_performance", group_id="grp1"),
+        _component("Standalone", "operational"),
     ])
     out = cs.render(summary)
-    assert "Child One" in out
-    assert "Child Two" in out
-    # The group container is filtered out by the current renderer.
-    assert "API Group" not in out
+    lines = out.splitlines()
+    # Group heading now appears (was dropped before Tier-2 #3).
+    assert any("API Group" in line for line in lines)
+
+    gi = next(i for i, line in enumerate(lines) if "API Group" in line)
+    c1 = next(i for i, line in enumerate(lines) if "Child One" in line)
+    c2 = next(i for i, line in enumerate(lines) if "Child Two" in line)
+    standalone = next(i for i, line in enumerate(lines) if "Standalone" in line)
+
+    # Children follow the heading and are indented deeper than top-level leaves.
+    assert c1 > gi and c2 > gi
+    assert lines[c1].startswith("    ") and lines[c2].startswith("    ")
+    assert lines[standalone].startswith("  ") and not lines[standalone].startswith("    ")
+
+    # Tally counts leaves only — the group container is not a service.
+    assert "2 operational" in out          # Child One + Standalone
+    assert "1 degraded performance" in out  # Child Two
+
+
+def test_render_empty_group_container_is_skipped(frozen_time, no_color):
+    """A group with no leaves shouldn't print a dangling heading."""
+    summary = _base_summary(components=[
+        _component("Empty Group", "operational", group=True, id="grp9"),
+        _component("Real Service", "operational"),
+    ])
+    out = cs.render(summary)
+    assert "Empty Group" not in out
+    assert "Real Service" in out
+
+
+def test_render_orphan_child_falls_back_to_top_level(frozen_time, no_color):
+    """A leaf whose group_id matches no group still renders (at top level)
+    rather than vanishing."""
+    summary = _base_summary(components=[
+        _component("Lonely Child", "operational", group_id="missing-grp"),
+    ])
+    out = cs.render(summary)
+    assert "Lonely Child" in out
+    assert "1 operational" in out
 
 
 # ── fetch_summary ─────────────────────────────────────────────────────────────
@@ -279,6 +316,67 @@ def test_fetch_summary_custom_base(monkeypatch):
 
     monkeypatch.setattr(cs.urllib.request, "urlopen", fake_urlopen)
     assert cs.fetch_summary("https://example.statuspage.io") == {}
+
+
+# ── fetch_summary: bounded retry (Tier-2 #4) ──────────────────────────────────
+@pytest.fixture
+def no_backoff(monkeypatch):
+    """Make retry backoff instant so retry tests don't actually sleep."""
+    monkeypatch.setattr(cs.time, "sleep", lambda *_: None)
+
+
+def test_fetch_summary_retries_then_succeeds(monkeypatch, no_backoff):
+    calls = {"n": 0}
+
+    def flaky(req, timeout=None):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise cs.urllib.error.URLError("temporary blip")
+        return _FakeResponse(b'{"ok": true}')
+
+    monkeypatch.setattr(cs.urllib.request, "urlopen", flaky)
+    assert cs.fetch_summary("https://x", retries=2) == {"ok": True}
+    assert calls["n"] == 3  # failed twice, succeeded on the third
+
+
+def test_fetch_summary_gives_up_after_retries(monkeypatch, no_backoff):
+    calls = {"n": 0}
+
+    def always_down(req, timeout=None):
+        calls["n"] += 1
+        raise cs.urllib.error.URLError("down")
+
+    monkeypatch.setattr(cs.urllib.request, "urlopen", always_down)
+    with pytest.raises(cs.urllib.error.URLError):
+        cs.fetch_summary("https://x", retries=2)
+    assert calls["n"] == 3  # initial attempt + 2 retries
+
+
+def test_fetch_summary_4xx_fails_fast(monkeypatch, no_backoff):
+    calls = {"n": 0}
+
+    def not_found(req, timeout=None):
+        calls["n"] += 1
+        raise cs.urllib.error.HTTPError("https://x", 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(cs.urllib.request, "urlopen", not_found)
+    with pytest.raises(cs.urllib.error.HTTPError):
+        cs.fetch_summary("https://x", retries=2)
+    assert calls["n"] == 1  # 4xx is not retried
+
+
+def test_fetch_summary_5xx_is_retried(monkeypatch, no_backoff):
+    calls = {"n": 0}
+
+    def server_error(req, timeout=None):
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise cs.urllib.error.HTTPError("https://x", 503, "Unavailable", {}, None)
+        return _FakeResponse(b"{}")
+
+    monkeypatch.setattr(cs.urllib.request, "urlopen", server_error)
+    assert cs.fetch_summary("https://x", retries=2) == {}
+    assert calls["n"] == 2  # one 503, then success
 
 
 # ── main / CLI ────────────────────────────────────────────────────────────────

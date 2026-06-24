@@ -87,12 +87,31 @@ def humanize(label: str) -> str:
     return label.replace("_", " ").title()
 
 
-def fetch_summary(base: str, timeout: float = 15.0) -> dict:
-    """GET the statuspage summary JSON. Raises on network/HTTP error."""
+def fetch_summary(base: str, timeout: float = 15.0, retries: int = 2,
+                  backoff: float = 0.5) -> dict:
+    """GET the statuspage summary JSON, retrying transient failures.
+
+    Connection errors, timeouts, and 5xx responses are retried up to
+    ``retries`` times with linear backoff. 4xx responses fail fast — they
+    won't fix themselves on retry. Raises the last error if every attempt
+    fails, or json.JSONDecodeError on a malformed body.
+    """
     url = base.rstrip("/") + SUMMARY_PATH
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            # HTTPError is a URLError subclass — catch it first. Only server
+            # errors (5xx) are worth retrying; client errors (4xx) are not.
+            if exc.code < 500 or attempt == retries:
+                raise
+        except (urllib.error.URLError, TimeoutError):
+            if attempt == retries:
+                raise
+        time.sleep(backoff * (attempt + 1))
+    raise RuntimeError("unreachable: retry loop exhausted")  # pragma: no cover
 
 
 def parse_ts(value: str | None):
@@ -143,17 +162,51 @@ def render(summary: dict) -> str:
     lines.append("")
 
     # ── Components ───────────────────────────────────────────────────────────
-    components = [c for c in summary.get("components", []) if not c.get("group")]
-    if components:
-        width = max((len(c.get("name", "")) for c in components), default=0)
-        counts: dict[str, int] = {}
+    # Statuspage splits components into group containers (``group: true``, with
+    # a ``components`` id-list) and leaf services (which carry ``group_id``).
+    # Render groups as headings with their leaves indented beneath, ungrouped
+    # leaves at the top level, and tally only the leaves.
+    all_components = summary.get("components", [])
+    group_ids = {c.get("id") for c in all_components if c.get("group")}
+    leaves = [c for c in all_components if not c.get("group")]
+    if leaves:
+        width = max((len(c.get("name", "")) for c in leaves), default=0)
+
+        def leaf_line(comp: dict, indent: str) -> str:
+            st = comp.get("status", "unknown")
+            col, sym = _COMPONENT_STYLE.get(st, ("cyan", "○"))
+            nm = comp.get("name", "").ljust(width)
+            return f"{indent}{paint(sym, col)} {nm}  {paint(humanize(st), col)}"
+
+        # Walk in array order: collect each group's leaves, keep ungrouped
+        # leaves inline. Orphan leaves (a group_id with no matching group)
+        # fall through to the top level rather than vanishing.
+        children: dict[str, list[dict]] = {}
+        plan: list[tuple[str, dict]] = []
+        for c in all_components:
+            if c.get("group"):
+                plan.append(("group", c))
+            elif c.get("group_id") in group_ids:
+                children.setdefault(c.get("group_id"), []).append(c)
+            else:
+                plan.append(("leaf", c))
+
         lines.append(paint("Components", "cyan", bold=True))
-        for c in components:
+        for kind, c in plan:
+            if kind == "group":
+                kids = children.get(c.get("id"), [])
+                if not kids:
+                    continue  # empty container — nothing to show
+                lines.append(f"  {paint(c.get('name', ''), 'cyan', bold=True)}")
+                for ch in kids:
+                    lines.append(leaf_line(ch, "    "))
+            else:
+                lines.append(leaf_line(c, "  "))
+
+        counts: dict[str, int] = {}
+        for c in leaves:
             st = c.get("status", "unknown")
             counts[st] = counts.get(st, 0) + 1
-            col, sym = _COMPONENT_STYLE.get(st, ("cyan", "○"))
-            nm = c.get("name", "").ljust(width)
-            lines.append(f"  {paint(sym, col)} {nm}  {paint(humanize(st), col)}")
         summary_bits = [paint(f"{n} {humanize(s).lower()}",
                               _COMPONENT_STYLE.get(s, ("cyan", ""))[0])
                         for s, n in sorted(counts.items())]
