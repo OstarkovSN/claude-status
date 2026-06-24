@@ -61,6 +61,21 @@ claude-status --url URL    # mirror any other Atlassian Statuspage
 - `--url` works against any Atlassian Statuspage (they all expose
   `/api/v2/summary.json`), so it doubles as a generic status-page mirror.
 
+## Development
+
+The tool ships with zero runtime dependencies, but the test suite and linter
+are dev-only tools (never imported by `claude_status.py`):
+
+```sh
+python -m pip install pytest ruff
+pytest          # run the tests
+ruff check .    # lint
+```
+
+Tests mock the Statuspage JSON and a frozen clock, so they run offline and
+deterministically. CI (GitHub Actions) runs lint + tests on Python 3.9–3.13 and
+verifies the tool imports and runs with the standard library alone.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

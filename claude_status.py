@@ -138,8 +138,8 @@ def render(summary: dict) -> str:
                  f"{paint(desc, color, bold=True)}")
     updated = page.get("updated_at")
     fetched = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-    lines.append(paint(f"  page updated {rel_age(updated)} · fetched {fetched} · {page.get('url','')}",
-                       "grey", dim=True))
+    meta = f"  page updated {rel_age(updated)} · fetched {fetched} · {page.get('url', '')}"
+    lines.append(paint(meta, "grey", dim=True))
     lines.append("")
 
     # ── Components ───────────────────────────────────────────────────────────
@@ -178,8 +178,8 @@ def render(summary: dict) -> str:
                 body = " ".join((latest.get("body") or "").split())
                 if len(body) > 200:
                     body = body[:197] + "..."
-                lines.append(f"     {paint('└', 'grey')} {body} "
-                             f"{paint('(' + rel_age(latest.get('created_at')) + ')', 'grey', dim=True)}")
+                age = paint(f"({rel_age(latest.get('created_at'))})", "grey", dim=True)
+                lines.append(f"     {paint('└', 'grey')} {body} {age}")
             if inc.get("shortlink"):
                 lines.append(paint(f"     {inc['shortlink']}", "blue", dim=True))
             lines.append("")
@@ -271,4 +271,4 @@ if __name__ == "__main__":
         # the interpreter-shutdown flush dumping a traceback.
         import os
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
-        raise SystemExit(0)
+        raise SystemExit(0) from None
