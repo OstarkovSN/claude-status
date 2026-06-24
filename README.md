@@ -42,6 +42,17 @@ install -m 755 claude_status.py ~/.local/bin/claude-status
 claude-status
 ```
 
+### Run with `uv` or `pipx`
+
+The script carries [PEP 723](https://peps.python.org/pep-0723/) inline metadata
+(`requires-python`, an empty `dependencies` list), so runners that understand it
+will fetch a suitable interpreter and run it directly — still nothing to install:
+
+```sh
+uv run claude_status.py            # or: uv run https://raw.githubusercontent.com/OstarkovSN/claude-status/main/claude_status.py
+pipx run claude_status.py
+```
+
 ## Usage
 
 ```
