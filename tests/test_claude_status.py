@@ -10,6 +10,7 @@ No third-party test deps — pytest + stdlib only, matching the tool's ethos.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -417,6 +418,44 @@ def test_main_bad_json_returns_1(monkeypatch, capsys):
     assert rc == 1
     err = capsys.readouterr().err
     assert "bad JSON" in err
+
+
+# ── PEP 723 inline script metadata (Tier-3 #9) ────────────────────────────────
+# Canonical block regex from PEP 723.
+PEP723_RE = re.compile(
+    r"(?m)^# /// (?P<type>[a-zA-Z0-9-]+)$\s(?P<content>(^#(| .*)$\s)+)^# ///$"
+)
+
+
+def _read_pep723_block() -> str:
+    """Extract and un-comment the script's PEP 723 metadata block body."""
+    src = Path(cs.__file__).read_text(encoding="utf-8")
+    blocks = [m for m in PEP723_RE.finditer(src) if m.group("type") == "script"]
+    assert len(blocks) == 1, "expected exactly one PEP 723 `script` block"
+    raw = blocks[0].group("content")
+    return "".join(
+        line[2:] if line.startswith("# ") else line[1:]
+        for line in raw.splitlines(keepends=True)
+    )
+
+
+def test_pep723_block_present_and_zero_dependency():
+    """The script must carry a PEP 723 block that declares NO dependencies —
+    guarding the zero-dependency promise at the metadata level too, and letting
+    `uv run` / `pipx run` execute it with the right interpreter."""
+    body = _read_pep723_block()
+    try:
+        import tomllib  # Python 3.11+
+    except ModuleNotFoundError:
+        tomllib = None
+    if tomllib is not None:
+        meta = tomllib.loads(body)
+        assert meta.get("dependencies") == [], "claude-status must stay zero-dep"
+        assert "requires-python" in meta
+    else:
+        # 3.9/3.10 ship no stdlib tomllib — fall back to text assertions.
+        assert "dependencies = []" in body
+        assert "requires-python" in body
 
 
 # ── live fixture smoke test ───────────────────────────────────────────────────
